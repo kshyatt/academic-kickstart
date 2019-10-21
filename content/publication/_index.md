@@ -1,6 +1,7 @@
 ---
 title: Publications
-
+summary: "List of publications"  # Add a page description.
+type: "widget_page"  # Page type is a Widget Page
 # View.
 #   1 = List
 #   2 = Compact
