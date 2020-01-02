@@ -28,7 +28,15 @@ image:
 projects: []
 ---
 
-Last year at JuliaCon, Matt Fishman and I gave a [talk](https://www.youtube.com/watch?v=A2ypJkA26co) about our ongoing effort to port the [ITensor](http://itensor.org) code from C++ to Julia. At the time, I mentioned that we had begun trying to integrate a GPU-based contraction backend and were looking forward to some significant speedups.
+# Introduction/Roadmap
+
+Last year at JuliaCon, Matt Fishman and I gave a [talk](https://www.youtube.com/watch?v=A2ypJkA26co) about our ongoing effort to port the [ITensor](http://itensor.org) code from C++ to Julia. At the time, I mentioned that we had begun trying to integrate a GPU-based contraction backend and were looking forward to some significant speedups. We ended up completing this integration, and saw runtimes for representative parameters go from one week to one hour. In this post I'm going to go over:
+
+- The physics problem we were writing code to solve
+- Why the GPU is a good candidate to accelerate our simulations to solve this problem
+- Why Julia is a natural choice if you want to take advantage of the GPU easily
+- How, after we wrote the initial implementation, we made it faster by removing roadblocks
+- Some final thoughts about why this worked out well for us
 
 # What is ITensor
 
@@ -55,7 +63,7 @@ In addition, there is a danger in the most naive approach to handling tensor con
 
 For these reasons, we weren't sure if the GPU would be a good choice for my current reseach project. You can read the physics details [here](https://arxiv.org/abs/1908.08833). We have a C++ implementation of this code which is CPU only and runs about 5000 lines. One of my goals with the project was to eventually open source the code in the hope that others might find it useful or improve it. However, C++, despite being a great langauge, can be intimidating to many people. I have some experience writing C code that uses CUDA which, despite the powerful API and really granular control over the device the programmer is provided, can also be intimidating and require you to keep a lot of balls in the air while you're writing the code. But the C++ solution, stuck on a single node as it was, with all parallelism coming from CPU BLAS spread over 28 cores, was taking up to a week to run to get a decent picture of the converged result. This was pretty frustrating from a development perspective because it meant the debug cycle of "something's wrong" - "OK, think I found it" - "is this a fix?" - "nope, something's still wrong" had to take place over multiple days. 
 
-Since Miles (the original author of ITensor) and Matt were already thinking of rewriting ITensor in Julia (see our talk for the motivations for this decision), I decided I would try to help and maybe try to add some GPU support to the new package. Many tensor network algorithms, not only this one, are dominated by tensor-tensor contractions as mentioned above. And since I had already had some experience working with Julia's GPU programming/wrapping infrastructre in [`CuArrays.jl`](https://github.com/JuliaGPU/CuArrays.jl), I thought it wouldn't be so hard to integrate a GPU based tensor operations backend to `ITensors.jl`. (In fact, we sometimes want to add or subtract tensors, not just contract them.)
+Since Miles (the original author of ITensor) and Matt were already thinking of rewriting ITensor in Julia (see our talk for the motivations for this decision), I decided I would try to help and maybe try to add some GPU support to the new package. Many tensor network algorithms, not only this one, are dominated by tensor-tensor contractions as mentioned above. And since I had already had some experience working with Julia's GPU programming/wrapping infrastructre in [`CuArrays.jl`](https://github.com/JuliaGPU/CuArrays.jl), I thought it wouldn't be so hard to integrate a GPU based tensor operations backend to [`ITensors.jl`](https://github.com/ITensor/ITensors.jl). (In fact, we sometimes want to add or subtract tensors, not just contract them.)
 
 Our first approach, and one I don't have benchmarks for, was the naive method described above - just permute everything and call `CUBLAS`'s general matrix-matrix multiplication routine. In general, handling GPU memory with `CuArrays.jl` was very easy. An `ITensor` is essentially an opaque `Vector` with some indices along for the ride, which tell you in what order to index elements of the `Vector`. It's analogous to `CartesianArray` for those who have used Julia's multidimensional array support. Since our algorithms usually require us to somehow achieve a contraction, QR decomposition, and addition, we thought treating the `ITensor` storage as essentially a blob you can permute and give to multiplication API calls would be enough. Usually in these algorithms you're not often accessing or manipulating single elements or slices of the `ITensor` (although this is possible to do and easy in both the C++ and Julia versions), just the tensors themselves.
 
@@ -151,7 +159,7 @@ function contract!(C::CuArray{T},
 end
 ```
 
-The design of `ITensors.jl` specifies that the `ITensor` type itself is not specialized on its storage type, so that from the user's point of view, they have a tensor-like object contracting with another tensor-like object, and the developers can worry about how to multiply a diagonal-like rank-6 tensor by a sparse rank-4 tensor. This makes it easier for users to implement the algorithms they need to do their research in, and it's one of the library's strengths. All that was needed to allow an `ITensor` with GPU-backed storage to play nicely with an `ITensor` with CPU-backed storage was few lines of edge case handling:
+The design of [`ITensors.jl`](https://github.com/ITensor/ITensors.jl) specifies that the `ITensor` type itself is not specialized on its storage type, so that from the user's point of view, they have a tensor-like object contracting with another tensor-like object, and the developers can worry about how to multiply a diagonal-like rank-6 tensor by a sparse rank-4 tensor. This makes it easier for users to implement the algorithms they need to do their research in, and it's one of the library's strengths. All that was needed to allow an `ITensor` with GPU-backed storage to play nicely with an `ITensor` with CPU-backed storage was few lines of edge case handling:
 
 ```julia
 function contract!!(R::CuDenseTensor{<:Number,NR}, labelsR::NTuple{NR}, T1::DenseTensor{<:Number,N1}, labelsT1::NTuple{N1}, T2::CuDenseTensor{<:Number,N2}, labelsT2::NTuple{N2}) where {NR,N1,N2}
@@ -162,13 +170,13 @@ function contract!!(R::CuDenseTensor{<:Number,NR}, labelsR::NTuple{NR}, T1::CuDe
 end
 ```
 
-I chose to copy the CPU storage to the device before the addition or contraction, hoping that this would occur rarely and that the performance gain in the main operation would offset the memory transfer time. Ideally this situation should never occur: we absolutely want to minimize memory transfers. However, if a user makes a mistake and forgets a `cuITensor(A)`, their code won't error out. In fact, in the latest version of `ITensorsGPU.jl` this dubious feature is disallowed, since in my code it was always the result of forgetting to initialize something on the GPU which should have been.
+I chose to copy the CPU storage to the device before the addition or contraction, hoping that this would occur rarely and that the performance gain in the main operation would offset the memory transfer time. Ideally this situation should never occur: we absolutely want to minimize memory transfers. However, if a user makes a mistake and forgets a `cuITensor(A)`, their code won't error out. In fact, in the latest version of [`ITensorsGPU.jl`](https://github.com/ITensor/ITensorsGPU.jl) this dubious feature is disallowed, since in my code it was always the result of forgetting to initialize something on the GPU which should have been.
 
 This was enough to get the barebones GPU support working. But I was still worried about the issue with the permutations, especially because the week-long simulations are those which are most memory intensive, and I was worried about running out of space on the device. Could there be a better solution?
 
-# `CUTENSOR` and the story of how AI made my labour useless
+# `CUTENSOR` and the story of how computers made my labour useless
 
-Around this time we became aware of [CUTENSOR](https://docs.nvidia.com/cuda/cutensor/index.html), an NVIDIA library designed exactly for our use case: adding and contracting high rank tensors with indices in arbitrary order. However, this library was, of course, written in C. Luckily Julia makes it pretty easy to wrap C APIs, and we got started doing so in [this epic PR](https://github.com/JuliaGPU/CuArrays.jl/pull/330). During the process of getting these wrappers into a state fit for a public facing library, Tim created some very nice scripts which automate the process of creating Julia wrappers for C functions, [automating away](https://github.com/JuliaGPU/CuArrays.jl/pull/421) many hours of labour I had performed years ago to get the sparse linear algebra and solver libraries working. Sic transit gloria mundi, I guess (generating these wrappers was not a glorious process). Now it will be easy for us to integrate changes to the `CUTENSOR` API over time as more features are added.
+Around this time we became aware of [CUTENSOR](https://docs.nvidia.com/cuda/cutensor/index.html), an NVIDIA library designed exactly for our use case: adding and contracting high rank tensors with indices in arbitrary order. However, this library was, of course, written in C. Luckily Julia makes it pretty easy to wrap C APIs, and we got started doing so in [this epic PR](https://github.com/JuliaGPU/CuArrays.jl/pull/330) to `CuArrays.jl`. `CuArrays.jl` already provides nice high- and low-level wrappers of CUDA C libraries in Julia, not only for dense or sparse linear algebra but also for random number generation and neural network primitives. So adding a multi-dimensional array library was a natural fit. During the process of getting these wrappers into a state fit for a public facing library, Tim created some very nice scripts which automate the process of creating Julia wrappers for C functions, [automating away](https://github.com/JuliaGPU/CuArrays.jl/pull/421) many hours of labour I had performed years ago to get the sparse linear algebra and solver libraries working. Sic transit gloria mundi, I guess (generating these wrappers was not a glorious process). Now it will be easy for us to integrate changes to the `CUTENSOR` API over time as more features are added.
 
 `CUTENSOR`'s internals handle matching up elements for products and sums as part of the contraction process, so the permutations that `ITensors.jl` performs for a CPU-based `ITensor` are unnecessary. By overriding a few functions we're able to call the correct internal routines which feed through to `CUTENSOR`:
 
@@ -204,7 +212,7 @@ function Base.:+(B::CuDenseTensor, A::CuDenseTensor)
 end
 ``` 
 
-Once these wrappers and their tests were merged into `CuArrays.jl`, I set about changing up how we were calling the contraction functions on the `ITensors.jl` side. Dealing with optional dependencies, as `CuArrays.jl` would have been for `ITensors.jl`, is still kind of a pain in Julia, so I made a new package, [`ITensorsGPU.jl`](https://github.com/ITensor/ITensorsGPU.jl), to hold all the CUDA-related logic. What's nice is that from the end-user's perspective, they just have copy the tensors to the GPU at the start of the simulation and afterwards everything works mostly seamlessly -- they don't have to concern themselves with index orders or anything. It frees the user to focus more on high-level algorithm design.
+Once these wrappers and their tests were merged into `CuArrays.jl`, I set about changing up how we were calling the contraction functions on the `ITensors.jl` side. We decided to do this because within `CUTENSOR` there were already highly optimized routines for various permutations, and we didn't want to try to reinvent the wheel with our permute-then-GEMM system. Switching to `CUTENSOR` let us abstract away the permutation-handling, so the code interfacing with `CuArrays.jl` was much simpler than under our previous approach. Dealing with optional dependencies, as `CuArrays.jl` would have been for `ITensors.jl`, is still kind of a pain in Julia, so I made a new package, [`ITensorsGPU.jl`](https://github.com/ITensor/ITensorsGPU.jl), to hold all the CUDA-related logic. What's nice is that from the end-user's perspective, they just have copy the tensors to the GPU at the start of the simulation and afterwards everything works mostly seamlessly -- they don't have to concern themselves with index orders or anything. It frees the user to focus more on high-level algorithm design.
 
 # Extirpating memory copies
 
@@ -214,7 +222,7 @@ Copying memory back and forth from the device is extremely slow, and the code wi
 nvprof ~/software/julia/julia prof_run.jl
 ```
 
-This generates some output like:
+This generates some output about how much time the GPU spent doing various things, which is very long horizontally - scroll the box sideways if you can't see the function names:
 
 ```bash
 ==1386746== Profiling application: julia prof_run.jl
@@ -298,3 +306,12 @@ And now I'm able to run simulations that used to take a week in an hour thanks t
 - The `CuArrays.jl` package makes it pretty easy and pleasant to integrate the GPU into your codebase. However, there are still some pain points (in the sparse linear algebra code especially) if someone is looking for a project to contribute to.
 - It's important to pick a problem like this that is about 95% of the way to the perfect problem for the GPU if you want to brag without having to do much work.
 - You should actually check to make sure that you aren't copying memory back and forth when you don't need to. If you are copying more than you think you should, you can try to figure out where it's coming from by inserting a `stacktrace` call into the `cudaMemcpy` calls at the [`CUDAdrv.jl`](https://github.com/JuliaGPU/CUDAdrv.jl/blob/75bf4e4385bd2c431080ec501b9ae6f3d6c771ec/src/memory.jl) package. That should tell you the location up the call stack in your code where the copy to/from the device is triggered.
+
+There were several things that made this transition successful:
+- The simplicity of writing Julia wrappers for C code (this let us quickly interface with `CUTENSOR`)
+- The existing ease of use of `CuArrays.jl` - now it's easy to extend this to a new library, and it made writing the constructors for our own types quite straightforward
+- The fact that our problem was well-suited for the GPU
+
+It's certainly true that we could have achieved the same, or possibly better, had we modified the C++ ITensor code to use the GPU. But I think it's fair to say it would have taken much more time, and would have been less accessible to other people in condensed matter physics. We were willing to settle for a slightly less than optimal speedup if the code to achieve it got written at all.
+
+If you want to look at some of the unpleasant internals of this, feel free to check out [`ITensorsGPU.jl`](https://github.com/ITensor/ITensorsGPU.jl) and try things out for yourself. If you're interested in learning more about tensor network algorithms, check out Miles' site [here](http://tensornetwork.org). 
